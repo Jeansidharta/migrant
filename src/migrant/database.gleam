@@ -139,10 +139,7 @@ fn apply(migration_tuple: #(String, Migration), db: sqlight.Connection) {
   case migration.up {
     Some(sql) -> {
       io.println("-> Applying migration: " <> name)
-      case
-        exec(db, "BEGIN TRANSACTION")
-        |> result.then(fn(_) { exec(db, sql) })
-      {
+      case exec(db, "BEGIN TRANSACTION;\n" <> sql) {
         Ok(_) -> {
           case
             mark_migration_as_applied(db, migration_tuple)
