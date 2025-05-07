@@ -134,7 +134,9 @@ pub fn apply_migrations(
   let count =
     migrations
     |> sort_migrations
-    |> run_migration(db, 0)
+    |> list.try_fold(0, fn(count, migration) {
+      apply(migration, db) |> result.map(fn(_) { count + 1 })
+    })
 
   case count {
     Ok(count) -> {
@@ -145,20 +147,12 @@ pub fn apply_migrations(
   }
 }
 
-fn run_migration(
-  migrations: List(#(String, Migration)),
-  db: sqlight.Connection,
-  count: Int,
-) -> Result(Int, Error) {
-  case migrations {
-    [] -> Ok(count)
-    [migration, ..rest] -> {
-      case apply(migration, db) {
-        Ok(_) -> run_migration(rest, db, count + 1)
-        Error(e) -> Error(e)
-      }
-    }
-  }
+fn with_success_message(e, msg: String) {
+  e
+  |> result.map(fn(e) {
+    io.println("-> " <> msg)
+    e
+  })
 }
 
 fn with_err_message(e, msg: String) {
@@ -175,7 +169,7 @@ fn apply(
 ) -> Result(Nil, Error) {
   let #(name, migration) = migration_tuple
 
-  use <- bool.guard(when: option.is_none(migration.up), return: {
+  use <- bool.lazy_guard(when: option.is_none(migration.up), return: fn() {
     io.println("-> Skipping migration: " <> name <> " no `up` query")
     Ok(Nil)
   })
@@ -188,7 +182,7 @@ fn apply(
     |> with_err_message("Failed to begin transaction"),
   )
 
-  // Attept to run all the actual UP queries that can fail
+  // Attempt to run all the actual UP queries that can fail
   let res = {
     // Execute the migration
     use _ <- result.try(
@@ -203,41 +197,18 @@ fn apply(
     )
 
     // Attempt to commit the transaction
-    use _ <- result.try(
-      db
-      |> exec("COMMIT;")
-      |> with_err_message("Failed to commit transaction"),
-    )
-
-    Ok(Nil)
+    exec(db, "COMMIT;")
+    |> with_err_message("Failed to commit transaction")
   }
 
-  // If the migration was successful, return
-  use <- bool.guard(when: result.is_ok(res), return: {
-    io.println("-> Migration applied successfully: " <> name)
-    Ok(Nil)
+  res
+  |> with_success_message("Migration applied successfully: " <> name)
+  |> result.try_recover(fn(err) {
+    case migration.down {
+      option.Some(down) -> rollback_with_user_migration(name, down, db, err)
+      option.None -> rollback_with_transaction(db, err)
+    }
   })
-
-  // If the migration failed and we don't have a down query, rollback the transaction
-  let assert Error(err) = res
-  use <- bool.guard(when: option.is_none(migration.down), return: {
-    err
-    |> rollback_with_transaction(db, _)
-  })
-
-  // Attempt to rollback the migration
-  use _ <- result.try(
-    err
-    |> rollback_with_user_migration(
-      name,
-      migration.down |> option.unwrap(""),
-      db,
-      _,
-    )
-    |> with_err_message("Failed to rollback migration: " <> name),
-  )
-
-  Ok(Nil)
 }
 
 fn rollback_with_transaction(
